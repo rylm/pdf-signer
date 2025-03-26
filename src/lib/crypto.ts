@@ -1,5 +1,5 @@
 import * as ed from '@noble/ed25519';
-import * as pkijs from 'pkijs';
+// import * as pkijs from 'pkijs';
 // import * as asn1js from 'asn1js';
 // import { pdflibAddPlaceholder } from '@signpdf/placeholder-pdf-lib';
 // import { SUBFILTER_ETSI_CADES_DETACHED } from '@signpdf/utils';
@@ -7,8 +7,8 @@ import * as pkijs from 'pkijs';
 // import { PDFDocument } from 'pdf-lib';
 import { Buffer } from 'buffer';
 
-const cryptoEngine = pkijs.getCrypto(true); // Use Web Crypto (true)
-pkijs.setEngine('webcrypto', cryptoEngine);
+// const cryptoEngine = pkijs.getCrypto(true); // Use Web Crypto (true)
+// pkijs.setEngine('webcrypto', cryptoEngine);
 
 export interface SignatureMetadata {
   timestamp: string;
