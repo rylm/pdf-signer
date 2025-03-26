@@ -257,7 +257,7 @@ export default function PdfPreview({
   };
 
   return (
-    <Card className="overflow-hidden">
+    <Card className="overflow-hidden py-0">
       <div className="bg-muted p-2 flex items-center justify-between">
         <div className="flex items-center gap-1">
           <Button variant="ghost" size="sm" onClick={handleZoomOut}>

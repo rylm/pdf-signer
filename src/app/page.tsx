@@ -212,16 +212,6 @@ export default function PDFSignerPage() {
     }
   };
 
-  // For testing UI flow without requiring actual uploads/validation
-  const handleSkipValidation = () => {
-    if (currentStep === 0) {
-      setKeypairValid(true);
-    } else if (currentStep === 1) {
-      setPdfUploaded(true);
-    }
-    handleNextStep();
-  };
-
   // Cleanup URLs when component unmounts
   useEffect(() => {
     return () => {
@@ -285,10 +275,7 @@ export default function PDFSignerPage() {
           {currentStep === 0 && (
             <>
               <KeypairInput onValidation={handleKeypairValidation} />
-              <div className="flex justify-between mt-6">
-                <Button variant="outline" onClick={handleSkipValidation}>
-                  Skip (UI Testing)
-                </Button>
+              <div className="flex justify-end mt-6">
                 <Button onClick={handleNextStep} disabled={!keypairValid}>
                   Next: Upload PDF
                 </Button>
