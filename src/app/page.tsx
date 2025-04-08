@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect } from 'react';
 import {
   Card,
   CardContent,
@@ -10,52 +10,58 @@ import {
 } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Stepper, Step } from '@/components/stepper';
-import KeypairInput from '@/components/keypair-input';
 import PdfUpload from '@/components/pdf-upload';
 import PdfPreview from '@/components/pdf-preview';
-import MetadataDisplay from '@/components/metadata-display';
+import UploadStatus from '@/components/upload-status';
 import {
   AlertCircle,
-  CheckCircle2,
   Download,
   FileSignature,
   Moon,
   Sun,
   ArrowLeft,
   Loader2,
+  CloudUpload,
+  RefreshCw,
+  RotateCcw,
 } from 'lucide-react';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { useTheme } from 'next-themes';
-import {
-  SignatureMetadata,
-  fileToUint8Array,
-  signPdfWithEd25519,
-} from '@/lib/crypto';
-import { addSignatureStampToPdf } from '@/lib/pdf-utils';
+import { fileToUint8Array } from '@/lib/crypto';
+import { addQrCodeToPdf } from '@/lib/pdf-utils';
+import { fetchPresignedUrl, uploadToS3, PresignedPostData } from '@/lib/api';
 
 export default function PDFSignerPage() {
+  // Log the API endpoint from environment variable during development
+  if (process.env.NODE_ENV === 'development') {
+    console.log('API Endpoint:', process.env.NEXT_PUBLIC_API_ENDPOINT);
+  }
+
   const [currentStep, setCurrentStep] = useState(0);
-  const [keypairValid, setKeypairValid] = useState(false);
-  const [privateKey, setPrivateKey] = useState('');
-  const [publicKey, setPublicKey] = useState('');
   const [pdfUploaded, setPdfUploaded] = useState(false);
-  const [pdfSigned, setPdfSigned] = useState(false);
   const [stampPlaced, setStampPlaced] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [isSigningPdf, setIsSigningPdf] = useState(false);
   const { theme, setTheme } = useTheme();
   const [mounted, setMounted] = useState(false);
   const [pdfFile, setPdfFile] = useState<File | null>(null);
-  const [signedPdfUrl, setSignedPdfUrl] = useState<string | null>(null);
-  const [signatureMetadata, setSignatureMetadata] =
-    useState<SignatureMetadata | null>(null);
-  const signedPdfBytesRef = useRef<Uint8Array | null>(null);
 
-  // Remove unused state variables or comment them if they might be used later
-  // const [stampPosition, setStampPosition] = useState<{ x: number; y: number; page: number } | null>(null);
-  const [isStamping, setIsStamping] = useState(false);
-  const [finalPdfUrl, setFinalPdfUrl] = useState<string | null>(null);
-  const finalPdfBytesRef = useRef<Uint8Array | null>(null);
+  // New state variables for the refactored workflow
+  const [isFetchingUrl, setIsFetchingUrl] = useState(false);
+  const [presignedPostData, setPresignedPostData] =
+    useState<PresignedPostData | null>(null);
+  const [finalS3Url, setFinalS3Url] = useState<string | null>(null);
+  const [stampedPdfBytes, setStampedPdfBytes] = useState<Uint8Array | null>(
+    null
+  );
+  const [isUploading, setIsUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [uploadComplete, setUploadComplete] = useState(false);
+
+  // Add state for stamped PDF preview URL
+  const [stampedPdfPreviewUrl, setStampedPdfPreviewUrl] = useState<
+    string | null
+  >(null);
 
   // After mounting, we can safely show the UI
   useEffect(() => {
@@ -63,7 +69,7 @@ export default function PDFSignerPage() {
   }, []);
 
   const handleNextStep = () => {
-    if (currentStep < 3) {
+    if (currentStep < 2) {
       setCurrentStep(currentStep + 1);
     }
   };
@@ -74,137 +80,170 @@ export default function PDFSignerPage() {
     }
   };
 
-  const handleKeypairValidation = (
-    isValid: boolean,
-    keyData?: { privateKey: string; publicKey: string }
-  ) => {
-    setKeypairValid(isValid);
-    if (keyData) {
-      setPrivateKey(keyData.privateKey);
-      setPublicKey(keyData.publicKey);
+  // Reset all state to start over
+  const handleReset = () => {
+    if (stampedPdfPreviewUrl) {
+      URL.revokeObjectURL(stampedPdfPreviewUrl);
     }
+    setCurrentStep(0);
+    setPdfUploaded(false);
+    setStampPlaced(false);
+    setError(null);
+    setPdfFile(null);
+    setIsFetchingUrl(false);
+    setPresignedPostData(null);
+    setFinalS3Url(null);
+    setStampedPdfBytes(null);
+    setStampedPdfPreviewUrl(null);
+    setIsUploading(false);
+    setUploadProgress(0);
+    setUploadError(null);
+    setUploadComplete(false);
   };
 
-  const handlePdfUpload = (isUploaded: boolean, fileData?: File) => {
+  const handlePdfUpload = async (isUploaded: boolean, fileData?: File) => {
     setPdfUploaded(isUploaded);
     if (fileData) {
       setPdfFile(fileData);
+      // When PDF is uploaded, fetch the presigned URL
+      await fetchPresignedUrlFromApi();
     } else {
       setPdfFile(null);
+      setFinalS3Url(null);
+      setPresignedPostData(null);
     }
     setError(null);
   };
 
-  const handleSignDocument = async () => {
-    if (!pdfFile || !privateKey || !publicKey) {
-      setError('Missing PDF file or valid keypair');
-      return;
-    }
-
-    setIsSigningPdf(true);
+  const fetchPresignedUrlFromApi = async () => {
+    setIsFetchingUrl(true);
     setError(null);
 
     try {
-      // Convert the PDF file to Uint8Array
-      const pdfBytes = await fileToUint8Array(pdfFile);
+      const response = await fetchPresignedUrl();
+      setPresignedPostData(response.presignedPostData);
+      setFinalS3Url(response.finalUrl);
 
-      // Sign the PDF with the provided keypair
-      const { signedPdfBytes, metadata } = await signPdfWithEd25519(
-        pdfBytes,
-        privateKey,
-        publicKey
-      );
-
-      // Store the signed PDF bytes for download
-      signedPdfBytesRef.current = signedPdfBytes;
-
-      // Create a URL for the signed PDF
-      const blob = new Blob([signedPdfBytes], { type: 'application/pdf' });
-      const url = URL.createObjectURL(blob);
-      setSignedPdfUrl(url);
-
-      // Set the signature metadata
-      setSignatureMetadata(metadata);
-
-      // Mark the PDF as signed
-      setPdfSigned(true);
+      // Move to the next step when successful
+      handleNextStep();
     } catch (err) {
       setError(
-        'Failed to sign the PDF: ' +
+        'Failed to get upload URL: ' +
           (err instanceof Error ? err.message : String(err))
       );
-      console.error('PDF signing error:', err);
+      console.error('API error:', err);
     } finally {
-      setIsSigningPdf(false);
+      setIsFetchingUrl(false);
     }
   };
 
-  const handleStampPlacement = async (position: {
+  const handleQrCodePlacement = async (position: {
     x: number;
     y: number;
     page?: number;
     stampImage?: string;
   }) => {
-    if (
-      !position.stampImage ||
-      !signedPdfBytesRef.current ||
-      !signatureMetadata
-    ) {
-      console.error('Missing stamp image or signed PDF data');
+    if (!position.stampImage || !pdfFile) {
+      console.error('Missing QR code image or PDF file');
       return;
     }
 
-    setIsStamping(true);
+    setError(null);
 
-    // Use the provided position or default to first page
-    const stampPosition = {
-      x: position.x,
-      y: position.y,
-      page: position.page || 0,
-    };
+    try {
+      // Convert file to Uint8Array
+      const pdfBytes = await fileToUint8Array(pdfFile);
 
-    console.log('Adding stamp to PDF...');
+      // Use the provided position or default to first page
+      const stampPosition = {
+        x: position.x,
+        y: position.y,
+        page: position.page || 0,
+      };
 
-    // Add the visual stamp to the PDF
-    const stampedPdfBytes = await addSignatureStampToPdf(
-      signedPdfBytesRef.current,
-      signatureMetadata,
-      stampPosition,
-      position.stampImage
-    );
+      console.log('Adding QR code to PDF...');
 
-    console.log('PDF stamping completed');
+      // Add the QR code to the PDF
+      const modifiedPdfBytes = await addQrCodeToPdf(
+        pdfBytes,
+        stampPosition,
+        position.stampImage
+      );
 
-    // Store the stamped PDF bytes for download
-    finalPdfBytesRef.current = stampedPdfBytes;
+      console.log('PDF modified with QR code');
 
-    // Create a URL for the stamped PDF
-    if (finalPdfUrl) {
-      URL.revokeObjectURL(finalPdfUrl);
+      // Store the modified PDF bytes for upload
+      setStampedPdfBytes(modifiedPdfBytes);
+
+      // Create a preview URL for the stamped PDF
+      const blob = new Blob([modifiedPdfBytes], { type: 'application/pdf' });
+      const previewUrl = URL.createObjectURL(blob);
+      setStampedPdfPreviewUrl(previewUrl);
+
+      // Mark the stamp as placed but DON'T advance to next step
+      setStampPlaced(true);
+    } catch (err) {
+      setError(
+        'Failed to add QR code to PDF: ' +
+          (err instanceof Error ? err.message : String(err))
+      );
+      console.error('PDF modification error:', err);
     }
-    const blob = new Blob([stampedPdfBytes], { type: 'application/pdf' });
-    const url = URL.createObjectURL(blob);
-    setFinalPdfUrl(url);
-
-    // Mark the stamp as placed
-    setStampPlaced(true);
-    setIsStamping(false);
   };
 
-  const handleDownloadSignedPdf = () => {
-    // Use final stamped PDF if available, otherwise use the signed PDF
-    const pdfBytes = finalPdfBytesRef.current || signedPdfBytesRef.current;
+  // Update the reset function
+  const resetQrCodePlacement = () => {
+    // If we have a preview URL, revoke it to avoid memory leaks
+    if (stampedPdfPreviewUrl) {
+      URL.revokeObjectURL(stampedPdfPreviewUrl);
+    }
+    setStampPlaced(false);
+    setStampedPdfBytes(null);
+    setStampedPdfPreviewUrl(null);
+  };
 
-    if (pdfBytes) {
-      const blob = new Blob([pdfBytes], {
+  const handleUploadToS3 = async () => {
+    if (!stampedPdfBytes || !presignedPostData) {
+      setError('Missing PDF data or upload information');
+      return;
+    }
+
+    setIsUploading(true);
+    setUploadProgress(0);
+    setUploadError(null);
+    setError(null);
+
+    try {
+      // Upload the stamped PDF to S3
+      await uploadToS3(presignedPostData, stampedPdfBytes, (progress) => {
+        setUploadProgress(progress);
+      });
+
+      // Mark as complete
+      setUploadComplete(true);
+      setUploadProgress(100);
+    } catch (err) {
+      setUploadError(
+        'Failed to upload PDF: ' +
+          (err instanceof Error ? err.message : String(err))
+      );
+      console.error('S3 upload error:', err);
+    } finally {
+      setIsUploading(false);
+    }
+  };
+
+  const handleDownloadModifiedPdf = () => {
+    if (stampedPdfBytes) {
+      const blob = new Blob([stampedPdfBytes], {
         type: 'application/pdf',
       });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
       a.download = pdfFile
-        ? `${pdfFile.name.replace('.pdf', '')}-signed.pdf`
-        : 'signed-document.pdf';
+        ? `${pdfFile.name.replace('.pdf', '')}-with-qr.pdf`
+        : 'document-with-qr.pdf';
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -212,17 +251,15 @@ export default function PDFSignerPage() {
     }
   };
 
-  // Cleanup URLs when component unmounts
+  // Update the cleanup in useEffect for memory management
   useEffect(() => {
     return () => {
-      if (signedPdfUrl) {
-        URL.revokeObjectURL(signedPdfUrl);
-      }
-      if (finalPdfUrl) {
-        URL.revokeObjectURL(finalPdfUrl);
+      // Clean up any blob URLs when component unmounts
+      if (stampedPdfPreviewUrl) {
+        URL.revokeObjectURL(stampedPdfPreviewUrl);
       }
     };
-  }, [signedPdfUrl, finalPdfUrl]);
+  }, [stampedPdfPreviewUrl]);
 
   if (!mounted) {
     return null;
@@ -249,200 +286,168 @@ export default function PDFSignerPage() {
         <CardHeader>
           <CardTitle className="text-2xl flex items-center gap-2">
             <FileSignature className="h-6 w-6" />
-            PDF Signer
+            PDF QR Code Stamper
           </CardTitle>
           <CardDescription>
-            Sign your PDF documents with an electronic signature and add a
-            visual stamp
+            Upload a PDF, add a verification QR code, and store it in the cloud.
           </CardDescription>
         </CardHeader>
+
         <CardContent>
           <Stepper currentStep={currentStep} className="mb-8">
-            <Step title="Keypair" description="Enter or generate keys" />
-            <Step title="Upload" description="Upload your PDF" />
-            <Step title="Sign" description="Sign and place stamp" />
-            <Step title="Download" description="Get your signed PDF" />
+            <Step
+              title="Upload PDF"
+              description="Select a PDF document from your computer"
+            />
+            <Step
+              title="Place QR Code"
+              description="Position the QR code on your document"
+            />
+            <Step
+              title="Upload & Finish"
+              description="Upload to cloud and get your document link"
+            />
           </Stepper>
 
           {error && (
             <Alert variant="destructive" className="mb-6">
               <AlertCircle className="h-4 w-4" />
               <AlertTitle>Error</AlertTitle>
-              <AlertDescription>{error}</AlertDescription>
+              <AlertDescription className="flex items-center justify-between">
+                <span>{error}</span>
+                {currentStep === 0 && pdfFile && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={fetchPresignedUrlFromApi}
+                    disabled={isFetchingUrl}
+                  >
+                    <RefreshCw className="mr-1 h-3.5 w-3.5" />
+                    Retry
+                  </Button>
+                )}
+              </AlertDescription>
             </Alert>
           )}
 
-          {currentStep === 0 && (
-            <>
-              <KeypairInput onValidation={handleKeypairValidation} />
-              <div className="flex justify-end mt-6">
-                <Button onClick={handleNextStep} disabled={!keypairValid}>
-                  Next: Upload PDF
-                </Button>
-              </div>
-            </>
-          )}
+          <div className="mb-6">
+            {currentStep === 0 && (
+              <div className="space-y-4">
+                <PdfUpload onUpload={handlePdfUpload} />
 
-          {currentStep === 1 && (
-            <>
-              <PdfUpload onUpload={handlePdfUpload} />
-              <div className="flex justify-between mt-6">
-                <Button
-                  variant="outline"
-                  onClick={handlePreviousStep}
-                  className="flex items-center gap-1"
-                >
-                  <ArrowLeft className="h-4 w-4" /> Back
-                </Button>
-                <Button onClick={handleNextStep} disabled={!pdfUploaded}>
-                  Next: Sign Document
-                </Button>
+                {isFetchingUrl && (
+                  <div className="flex items-center justify-center p-4">
+                    <Loader2 className="h-6 w-6 animate-spin mr-2" />
+                    <span>Getting upload URL...</span>
+                  </div>
+                )}
               </div>
-            </>
-          )}
+            )}
 
-          {currentStep === 2 && (
-            <>
-              <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-                <div className="lg:col-span-2 relative">
-                  {isStamping && (
-                    <div className="absolute inset-0 bg-background/80 z-50 flex items-center justify-center">
-                      <div className="flex flex-col items-center">
-                        <Loader2 className="h-10 w-10 animate-spin text-primary mb-2" />
-                        <p>Adding stamp to document...</p>
-                      </div>
-                    </div>
-                  )}
+            {currentStep === 1 && (
+              <div className="space-y-4">
+                <div className="h-[600px]">
                   <PdfPreview
-                    isSigned={pdfSigned}
-                    onStampPlaced={handleStampPlacement}
-                    pdfFile={signedPdfUrl && finalPdfUrl ? null : pdfFile}
-                    pdfUrl={finalPdfUrl || signedPdfUrl || undefined}
-                    signatureMetadata={signatureMetadata || undefined}
+                    pdfFile={pdfFile}
+                    pdfUrl={stampedPdfPreviewUrl || undefined}
+                    qrCodeUrl={finalS3Url}
+                    onStampPlaced={handleQrCodePlacement}
+                    isPlacementComplete={stampPlaced}
+                    onResetPlacement={resetQrCodePlacement}
                   />
                 </div>
-                <div>
-                  {pdfSigned && signatureMetadata ? (
-                    <MetadataDisplay metadata={signatureMetadata} />
-                  ) : (
-                    <Card>
-                      <CardHeader>
-                        <CardTitle>Sign Document</CardTitle>
-                        <CardDescription>
-                          Click the button below to sign the document with your
-                          keypair
-                        </CardDescription>
-                      </CardHeader>
-                      <CardContent>
-                        <Button
-                          onClick={handleSignDocument}
-                          className="w-full"
-                          disabled={isSigningPdf}
-                        >
-                          {isSigningPdf ? (
-                            <>
-                              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                              Signing...
-                            </>
-                          ) : (
-                            'Sign Document'
-                          )}
-                        </Button>
-                      </CardContent>
-                    </Card>
+
+                {/* Show continue button after stamp is placed */}
+                {stampPlaced && (
+                  <div className="flex justify-end gap-3 mt-4">
+                    <Button onClick={handleNextStep}>Continue</Button>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {currentStep === 2 && (
+              <div className="space-y-6">
+                <UploadStatus
+                  isUploading={isUploading}
+                  uploadProgress={uploadProgress}
+                  uploadComplete={uploadComplete}
+                  uploadError={uploadError}
+                  finalUrl={finalS3Url}
+                />
+
+                <div className="flex flex-wrap gap-3 mt-4">
+                  {/* Upload/Retry button - only show if not already completed */}
+                  {!uploadComplete && (
+                    <Button
+                      onClick={handleUploadToS3}
+                      disabled={isUploading || !stampedPdfBytes}
+                    >
+                      {isUploading ? (
+                        <>
+                          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                          Uploading...
+                        </>
+                      ) : uploadError ? (
+                        <>
+                          <RefreshCw className="mr-2 h-4 w-4" />
+                          Retry Upload
+                        </>
+                      ) : (
+                        <>
+                          <CloudUpload className="mr-2 h-4 w-4" />
+                          Upload to Cloud
+                        </>
+                      )}
+                    </Button>
                   )}
-                </div>
-              </div>
-              <div className="flex justify-between mt-6">
-                <Button
-                  variant="outline"
-                  onClick={handlePreviousStep}
-                  className="flex items-center gap-1"
-                >
-                  <ArrowLeft className="h-4 w-4" /> Back
-                </Button>
-                <Button
-                  onClick={handleNextStep}
-                  disabled={!pdfSigned || !stampPlaced}
-                >
-                  Next: Download
-                </Button>
-              </div>
-            </>
-          )}
 
-          {currentStep === 3 && (
-            <>
-              <div className="flex flex-col items-center justify-center py-12">
-                <div className="mb-6 text-center">
-                  <CheckCircle2 className="h-16 w-16 text-green-500 mx-auto mb-4" />
-                  <h2 className="text-2xl font-bold mb-2">
-                    PDF Successfully Signed!
-                  </h2>
-                  <p className="text-muted-foreground">
-                    Your PDF has been signed with your keypair and includes a
-                    visual stamp with the signature metadata.
-                  </p>
-                </div>
-                <Button
-                  size="lg"
-                  className="gap-2"
-                  onClick={handleDownloadSignedPdf}
-                >
-                  <Download className="h-4 w-4" />
-                  Download Signed PDF
-                </Button>
-                <div className="flex gap-4 mt-6">
                   <Button
                     variant="outline"
-                    onClick={handlePreviousStep}
-                    className="flex items-center gap-1"
+                    onClick={handleDownloadModifiedPdf}
+                    disabled={!stampedPdfBytes}
                   >
-                    <ArrowLeft className="h-4 w-4" /> Back
+                    <Download className="mr-2 h-4 w-4" />
+                    Download PDF
                   </Button>
+
+                  {/* Add Start Over button */}
                   <Button
                     variant="outline"
-                    onClick={() => {
-                      // Reset all state to initial values
-                      setCurrentStep(0);
-                      setKeypairValid(false);
-                      setPrivateKey('');
-                      setPublicKey('');
-                      setPdfFile(null);
-                      setPdfUploaded(false);
-                      setPdfSigned(false);
-                      setStampPlaced(false);
-                      setError(null);
-
-                      // Clean up PDF URLs and references
-                      if (signedPdfUrl) {
-                        URL.revokeObjectURL(signedPdfUrl);
-                        setSignedPdfUrl(null);
-                      }
-                      if (finalPdfUrl) {
-                        URL.revokeObjectURL(finalPdfUrl);
-                        setFinalPdfUrl(null);
-                      }
-                      signedPdfBytesRef.current = null;
-                      finalPdfBytesRef.current = null;
-                      setSignatureMetadata(null);
-
-                      // Add slight delay to ensure all state changes have propagated
-                      setTimeout(() => {
-                        // Force a component re-render if needed
-                        setMounted(false);
-                        setTimeout(() => {
-                          setMounted(true);
-                        }, 50);
-                      }, 50);
-                    }}
+                    onClick={handleReset}
+                    className="ml-auto"
                   >
-                    Sign Another Document
+                    <RotateCcw className="mr-2 h-4 w-4" />
+                    Start Over
                   </Button>
                 </div>
               </div>
-            </>
-          )}
+            )}
+          </div>
+
+          <div className="flex justify-between">
+            <Button
+              variant="outline"
+              onClick={handlePreviousStep}
+              disabled={currentStep === 0}
+            >
+              <ArrowLeft className="mr-2 h-4 w-4" />
+              Back
+            </Button>
+
+            {currentStep === 0 && (
+              <Button
+                onClick={handleNextStep}
+                disabled={!pdfUploaded || !finalS3Url}
+              >
+                Next
+              </Button>
+            )}
+
+            {currentStep === 1 && !stampPlaced && (
+              <Button disabled={true}>Place QR Code to Continue</Button>
+            )}
+          </div>
         </CardContent>
       </Card>
     </div>

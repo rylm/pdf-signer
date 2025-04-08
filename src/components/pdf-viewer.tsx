@@ -7,12 +7,21 @@ if (typeof window !== 'undefined') {
   pdfjs.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs';
 }
 
+// Define a type for page dimensions
+export interface PDFPageInfo {
+  width: number;
+  height: number;
+  originalWidth: number;
+  originalHeight: number;
+}
+
 interface PDFViewerProps {
   file: File | string | null;
   pageNumber: number;
   scale: number;
   onLoadSuccess: ({ numPages }: { numPages: number }) => void;
   onLoadError: (error: Error) => void;
+  onPageLoadSuccess?: (page: PDFPageInfo) => void;
 }
 
 export function PDFViewer({
@@ -21,6 +30,7 @@ export function PDFViewer({
   scale,
   onLoadSuccess,
   onLoadError,
+  onPageLoadSuccess,
 }: PDFViewerProps) {
   if (!file) return null;
 
@@ -36,6 +46,7 @@ export function PDFViewer({
         renderTextLayer={false}
         renderAnnotationLayer={false}
         scale={scale}
+        onLoadSuccess={onPageLoadSuccess}
       />
     </Document>
   );

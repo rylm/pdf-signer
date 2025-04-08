@@ -1,12 +1,11 @@
 'use client';
 
 import type React from 'react';
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import dynamic from 'next/dynamic';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { Stamp } from '@/components/stamp';
-import { SignatureMetadata } from '@/lib/crypto';
+import { QRCodeStamp } from '@/components/qr-code-stamp';
 import * as htmlToImage from 'html-to-image';
 import {
   ZoomIn,
@@ -16,7 +15,9 @@ import {
   ChevronRight,
   Loader2,
   FileWarning,
+  RefreshCw,
 } from 'lucide-react';
+import { PDFPageInfo } from './pdf-viewer';
 
 // Define the interface for the PDF viewer component
 interface PDFViewerProps {
@@ -25,6 +26,7 @@ interface PDFViewerProps {
   scale: number;
   onLoadSuccess: ({ numPages }: { numPages: number }) => void;
   onLoadError: (error: Error) => void;
+  onPageLoadSuccess?: (page: PDFPageInfo) => void;
 }
 
 // Dynamically import react-pdf components with no SSR
@@ -42,7 +44,6 @@ const PDFViewer = dynamic<PDFViewerProps>(
 );
 
 interface PdfPreviewProps {
-  isSigned: boolean;
   onStampPlaced: (position: {
     x: number;
     y: number;
@@ -51,21 +52,30 @@ interface PdfPreviewProps {
   }) => void;
   pdfFile: File | null;
   pdfUrl?: string;
-  signatureMetadata?: SignatureMetadata;
+  qrCodeUrl: string | null;
+  isPlacementComplete?: boolean;
+  onResetPlacement?: () => void;
+}
+
+// Define or update the StampPosition interface to include page
+interface StampPosition {
+  x: number;
+  y: number;
+  page: number;
 }
 
 export default function PdfPreview({
-  isSigned,
   onStampPlaced,
   pdfFile,
   pdfUrl,
-  signatureMetadata,
+  qrCodeUrl,
+  isPlacementComplete = false,
+  onResetPlacement,
 }: PdfPreviewProps) {
   const [scale, setScale] = useState(1);
-  const [stampPosition, setStampPosition] = useState<{
-    x: number;
-    y: number;
-  } | null>(null);
+  const [stampPosition, setStampPosition] = useState<StampPosition | null>(
+    null
+  );
   const [isDraggingStamp, setIsDraggingStamp] = useState(false);
   const [isPlacingStamp, setIsPlacingStamp] = useState(false);
   const [isStampPlaced, setIsStampPlaced] = useState(false);
@@ -75,28 +85,33 @@ export default function PdfPreview({
   const [numPages, setNumPages] = useState<number | null>(null);
   const [pageNumber, setPageNumber] = useState(1);
   const [pdfError, setPdfError] = useState<string | null>(null);
-  const [isLoading, setIsLoading] = useState(false);
+
+  // Add state for PDF dimensions
+  const [pdfDimensions, setPdfDimensions] = useState<{
+    width: number;
+    height: number;
+  } | null>(null);
 
   const previewRef = useRef<HTMLDivElement>(null);
   const stampRef = useRef<HTMLDivElement>(null);
+  const pdfWrapperRef = useRef<HTMLDivElement>(null); // Ref for the new wrapper
+
+  // Watch the isPlacementComplete prop to sync with internal state
+  useEffect(() => {
+    setIsStampPlaced(isPlacementComplete);
+  }, [isPlacementComplete]);
 
   useEffect(() => {
-    if (isSigned && !isStampPlaced) {
+    // If we have a QR code URL and not in placement mode, start placing
+    if (qrCodeUrl && !isStampPlaced) {
       setIsPlacingStamp(true);
     }
-  }, [isSigned, isStampPlaced]);
+  }, [qrCodeUrl, isStampPlaced]);
 
   // Reset page number when changing files or URLs
   useEffect(() => {
     setPageNumber(1);
     setPdfError(null);
-  }, [pdfFile, pdfUrl]);
-
-  // Update loading initialization for both file and URL
-  useEffect(() => {
-    if (pdfFile || pdfUrl) {
-      setIsLoading(true);
-    }
   }, [pdfFile, pdfUrl]);
 
   const handleZoomIn = () => {
@@ -119,70 +134,108 @@ export default function PdfPreview({
 
   const onDocumentLoadSuccess = ({ numPages }: { numPages: number }) => {
     setNumPages(numPages);
-    setIsLoading(false);
   };
+
+  // Update the handlePageLoadSuccess function
+  const handlePageLoadSuccess = useCallback((page: PDFPageInfo) => {
+    setPdfDimensions({ width: page.width, height: page.height });
+  }, []);
 
   const onDocumentLoadError = (error: Error) => {
     console.error('Error loading PDF:', error);
     setPdfError(
       'Failed to load the PDF document. The file may be corrupted or invalid.'
     );
-    setIsLoading(false);
   };
 
+  // Helper function to calculate coordinates relative to PDF wrapper
+  const getCoordsRelativeToPdf = (
+    e: React.MouseEvent<HTMLDivElement>
+  ): { x: number; y: number } | null => {
+    const wrapperElement = pdfWrapperRef.current;
+    if (!wrapperElement || !pdfDimensions) {
+      console.error('PDF Wrapper or dimensions not available');
+      return null;
+    }
+    const wrapperRect = wrapperElement.getBoundingClientRect();
+
+    // Click relative to the wrapper's top-left corner
+    const clickXOnWrapper = e.clientX - wrapperRect.left;
+    const clickYOnWrapper = e.clientY - wrapperRect.top;
+
+    // Convert to unscaled coordinates (relative to PDF page top-left)
+    const unscaledX = clickXOnWrapper / scale;
+    const unscaledY = clickYOnWrapper / scale;
+
+    console.log(
+      `Unscaled position: (${unscaledX.toFixed(2)}, ${unscaledY.toFixed(2)})`
+    );
+
+    return { x: unscaledX, y: unscaledY };
+  };
+
+  // Updated handlePreviewClick
   const handlePreviewClick = (e: React.MouseEvent<HTMLDivElement>) => {
     if (!isPlacingStamp || isStampPlaced || isDraggingStamp) return;
 
-    // Get the bounding rectangle of the preview container
-    const previewRect = previewRef.current?.getBoundingClientRect();
-    if (!previewRect) return;
+    const coords = getCoordsRelativeToPdf(e);
+    if (!coords) return;
 
-    // Calculate the clicked position relative to the preview container,
-    // taking into account the current scale
-    const x = (e.clientX - previewRect.left) / scale;
-    const y = (e.clientY - previewRect.top) / scale;
-
-    console.log(`Setting initial stamp position: (${x}, ${y})`);
-    setStampPosition({ x, y });
+    setStampPosition({
+      x: coords.x,
+      y: coords.y,
+      page: pageNumber - 1,
+    });
     setIsStampPlaced(true);
   };
 
+  // Updated handleStampMouseDown
   const handleStampMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
     if (!isStampPlaced || !stampRef.current) return;
-
     e.stopPropagation();
     e.preventDefault();
-    setIsDraggingStamp(true);
 
-    // Get the stamp element's position and size
     const stampRect = stampRef.current.getBoundingClientRect();
-    // Calculate the center of the stamp
     const stampCenterX = stampRect.left + stampRect.width / 2;
     const stampCenterY = stampRect.top + stampRect.height / 2;
-
-    // Calculate offsets from the mouse position to the center of the stamp
     const offsetX = e.clientX - stampCenterX;
     const offsetY = e.clientY - stampCenterY;
 
-    console.log(`Drag started. Offset from center: (${offsetX}, ${offsetY})`);
+    console.log(`Stamp drag started`);
+
+    setIsDraggingStamp(true);
     setDragOffset({ x: offsetX, y: offsetY });
   };
 
+  // Updated handleMouseMove
   const handleMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (!isDraggingStamp || !dragOffset || !previewRef.current) return;
+    if (
+      !isDraggingStamp ||
+      !dragOffset ||
+      !pdfWrapperRef.current ||
+      !stampPosition
+    )
+      return;
 
-    // Get the preview container's position
-    const previewRect = previewRef.current.getBoundingClientRect();
+    const wrapperRect = pdfWrapperRef.current.getBoundingClientRect();
 
-    // Calculate the new position, accounting for:
-    // 1. The offset from the mouse to the center of the stamp
-    // 2. The position of the preview container
-    // 3. The current scale
-    const newX = (e.clientX - dragOffset.x - previewRect.left) / scale;
-    const newY = (e.clientY - dragOffset.y - previewRect.top) / scale;
+    // Target center in viewport coordinates
+    const targetCenterXViewport = e.clientX - dragOffset.x;
+    const targetCenterYViewport = e.clientY - dragOffset.y;
 
-    console.log(`Dragging to: (${newX}, ${newY})`);
-    setStampPosition({ x: newX, y: newY });
+    // Convert to coordinates relative to the wrapper
+    const targetCenterXOnWrapper = targetCenterXViewport - wrapperRect.left;
+    const targetCenterYOnWrapper = targetCenterYViewport - wrapperRect.top;
+
+    // Convert to unscaled coordinates
+    const unscaledX = targetCenterXOnWrapper / scale;
+    const unscaledY = targetCenterYOnWrapper / scale;
+
+    setStampPosition({
+      x: unscaledX,
+      y: unscaledY,
+      page: stampPosition.page,
+    });
   };
 
   const handleMouseUp = () => {
@@ -195,42 +248,46 @@ export default function PdfPreview({
   const handleConfirmPlacement = async () => {
     if (!stampPosition || !stampRef.current || !previewRef.current) return;
 
-    // Find the stamp component
-    const stampComponent = stampRef.current.querySelector('.stamp-component');
-
-    if (!stampComponent) {
-      console.error('Could not find stamp component');
-      return;
-    }
-
-    console.log('Capturing stamp as PNG...');
+    console.log('Capturing QR code...');
 
     // Make sure all styles are included and computed correctly
     const stampOptions = {
       quality: 1,
       pixelRatio: 4,
       width: 180,
-      height: 100, // Increased height to ensure all content is visible
+      height: 200, // Increased height to accommodate padding
       skipAutoScale: true,
       fontEmbedCSS: document.querySelector('style')?.innerHTML || '',
       includeQuerySelector: true,
       style: {
         padding: '12px',
+        paddingBottom: '24px', // Significantly increased bottom padding
         borderRadius: '8px',
         background: '#eff6ff',
         border: '2px solid #3b82f6',
         boxSizing: 'border-box',
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
       },
     };
 
     try {
+      // Use the stamp element directly to ensure all styles are captured
+      const stampElement = stampRef.current.querySelector('.stamp-component');
+
+      if (!stampElement) {
+        console.error('Could not find stamp component');
+        return;
+      }
+
       // Capture the stamp component as PNG with higher quality
       const pngImage = await htmlToImage.toPng(
-        stampComponent as HTMLElement,
+        stampElement as HTMLElement,
         stampOptions
       );
 
-      console.log('Stamp captured successfully as PNG');
+      console.log('QR code captured successfully');
 
       // Call onStampPlaced with position and PNG data
       onStampPlaced({
@@ -243,9 +300,8 @@ export default function PdfPreview({
       // Hide the stamp component after placing
       setStampPosition(null);
       setIsPlacingStamp(false);
-      setIsStampPlaced(true);
     } catch (error) {
-      console.error('Failed to capture stamp:', error);
+      console.error('Failed to capture QR code:', error);
     }
   };
 
@@ -253,158 +309,169 @@ export default function PdfPreview({
     setStampPosition(null);
     setIsStampPlaced(false);
     setIsPlacingStamp(true);
-    // No need to call onStampPlaced here since we're resetting
+
+    // Call the parent's reset function if provided
+    if (onResetPlacement) {
+      onResetPlacement();
+    }
   };
 
   return (
-    <Card className="overflow-hidden py-0">
-      <div className="bg-muted p-2 flex items-center justify-between">
-        <div className="flex items-center gap-1">
-          <Button variant="ghost" size="sm" onClick={handleZoomOut}>
-            <ZoomOut className="h-4 w-4" />
+    <Card className="p-1 h-full flex flex-col bg-background border shadow-sm">
+      <div className="flex flex-wrap items-center justify-between gap-2 p-2 mb-1">
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            variant="outline"
+            size="icon"
+            onClick={handleZoomOut}
+            aria-label="Zoom out"
+            disabled={scale <= 0.5}
+          >
+            <ZoomOut className="w-4 h-4" />
           </Button>
-          <span className="text-sm">{Math.round(scale * 100)}%</span>
-          <Button variant="ghost" size="sm" onClick={handleZoomIn}>
-            <ZoomIn className="h-4 w-4" />
+          <Button
+            variant="outline"
+            size="icon"
+            onClick={handleZoomIn}
+            aria-label="Zoom in"
+            disabled={scale >= 2}
+          >
+            <ZoomIn className="w-4 h-4" />
           </Button>
+          <span className="text-xs text-muted-foreground">
+            {Math.round(scale * 100)}%
+          </span>
 
-          {numPages && numPages > 1 && (
-            <div className="flex items-center ml-4">
+          {numPages && (
+            <div className="flex items-center gap-1">
               <Button
-                variant="ghost"
-                size="sm"
-                onClick={handlePreviousPage}
+                variant="outline"
+                size="icon"
                 disabled={pageNumber <= 1}
+                onClick={handlePreviousPage}
+                aria-label="Previous page"
               >
-                <ChevronLeft className="h-4 w-4" />
+                <ChevronLeft className="w-4 h-4" />
               </Button>
-              <span className="text-sm mx-2">
+              <span className="text-xs text-muted-foreground whitespace-nowrap">
                 {pageNumber} / {numPages}
               </span>
               <Button
-                variant="ghost"
-                size="sm"
+                variant="outline"
+                size="icon"
+                disabled={!numPages || pageNumber >= numPages}
                 onClick={handleNextPage}
-                disabled={pageNumber >= numPages}
+                aria-label="Next page"
               >
-                <ChevronRight className="h-4 w-4" />
+                <ChevronRight className="w-4 h-4" />
               </Button>
             </div>
           )}
         </div>
 
         {isPlacingStamp && (
-          <div className="flex items-center gap-2">
-            <div className="flex items-center text-sm text-muted-foreground">
-              <Info className="h-4 w-4 mr-1" />
-              {isStampPlaced
-                ? 'Drag to adjust position'
-                : 'Click to place stamp'}
-            </div>
-            {isStampPlaced && (
+          <div className="flex gap-2 ml-auto">
+            {isStampPlaced ? (
               <>
-                <Button size="sm" onClick={handleConfirmPlacement}>
-                  Confirm Placement
-                </Button>
                 <Button
-                  size="sm"
                   variant="outline"
+                  size="sm"
                   onClick={handleResetPlacement}
+                  className="text-xs whitespace-nowrap"
                 >
                   Reset
                 </Button>
+                <Button
+                  size="sm"
+                  onClick={handleConfirmPlacement}
+                  className="text-xs whitespace-nowrap"
+                >
+                  Confirm
+                </Button>
               </>
+            ) : (
+              <div className="text-xs text-muted-foreground flex items-center">
+                <Info className="h-3 w-3 mr-1" />
+                Click on the document to place the QR code
+              </div>
             )}
+          </div>
+        )}
+
+        {/* Add reposition button when placement is complete but we're not in placing mode */}
+        {isPlacementComplete && !isPlacingStamp && (
+          <div className="flex gap-2 ml-auto">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleResetPlacement}
+              className="text-xs whitespace-nowrap"
+            >
+              <RefreshCw className="mr-1 h-3.5 w-3.5" />
+              Reposition QR Code
+            </Button>
           </div>
         )}
       </div>
 
       <div
-        className="relative overflow-auto bg-gray-100 dark:bg-gray-800 h-[600px] flex items-center justify-center"
         ref={previewRef}
+        className={`flex-1 overflow-auto relative flex justify-center items-center ${
+          isPlacingStamp && !isStampPlaced ? 'cursor-cell' : ''
+        }`}
+        onClick={handlePreviewClick}
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}
         onMouseLeave={handleMouseUp}
       >
-        {pdfFile || pdfUrl ? (
-          <>
-            {isLoading && !pdfError && (
-              <div className="absolute inset-0 flex flex-col items-center justify-center bg-background/80 z-10">
-                <Loader2 className="h-8 w-8 animate-spin text-primary mb-2" />
-                <p className="text-sm text-muted-foreground">Loading PDF...</p>
-              </div>
-            )}
-            {pdfError ? (
-              <div className="flex flex-col items-center justify-center p-8 text-center">
-                <FileWarning className="h-12 w-12 text-destructive mb-4" />
-                <h3 className="text-lg font-medium mb-2">Error Loading PDF</h3>
-                <p className="text-sm text-muted-foreground">{pdfError}</p>
-              </div>
-            ) : (
-              <div
-                className="relative bg-white dark:bg-gray-700 shadow-lg"
-                style={{
-                  transform: `scale(${scale})`,
-                  transformOrigin: 'center',
-                  cursor:
-                    isPlacingStamp && !isStampPlaced ? 'crosshair' : 'default',
-                }}
-                onClick={handlePreviewClick}
-              >
-                <PDFViewer
-                  file={pdfUrl || pdfFile}
-                  pageNumber={pageNumber}
-                  scale={scale}
-                  onLoadSuccess={onDocumentLoadSuccess}
-                  onLoadError={onDocumentLoadError}
-                />
-
-                {/* Stamp overlay */}
-                {stampPosition && (
-                  <div
-                    ref={stampRef}
-                    className="absolute"
-                    style={{
-                      left: `${stampPosition.x}px`,
-                      top: `${stampPosition.y}px`,
-                      transform: 'translate(-50%, -50%)',
-                      userSelect: 'none',
-                      touchAction: 'none',
-                      zIndex: 10,
-                      cursor: isPlacingStamp ? 'move' : 'default',
-                      background: 'transparent',
-                      padding: 0,
-                      margin: 0,
-                    }}
-                    onMouseDown={handleStampMouseDown}
-                  >
-                    <Stamp metadata={signatureMetadata} />
-                  </div>
-                )}
-              </div>
-            )}
-          </>
-        ) : (
-          <div className="flex flex-col items-center justify-center p-8 text-center">
-            <p className="text-muted-foreground">
-              No PDF file uploaded. Please upload a PDF in the previous step.
-            </p>
+        {pdfError ? (
+          <div className="h-full flex flex-col items-center justify-center text-center p-4">
+            <FileWarning className="h-8 w-8 text-destructive mb-2" />
+            <p className="text-sm text-muted-foreground">{pdfError}</p>
           </div>
-        )}
+        ) : (
+          // New wrapper div for positioning context
+          <div
+            ref={pdfWrapperRef}
+            className="pdf-render-wrapper"
+            style={{
+              position: 'relative', // Positioning context for the stamp
+              width: pdfDimensions
+                ? `${pdfDimensions.width * scale}px`
+                : 'auto',
+              height: pdfDimensions
+                ? `${pdfDimensions.height * scale}px`
+                : 'auto',
+              overflow: 'visible', // Ensure stamp isn't clipped if slightly outside
+            }}
+          >
+            <PDFViewer
+              file={pdfUrl || pdfFile}
+              pageNumber={pageNumber}
+              scale={scale}
+              onLoadSuccess={onDocumentLoadSuccess}
+              onLoadError={onDocumentLoadError}
+              onPageLoadSuccess={handlePageLoadSuccess}
+            />
 
-        {isPlacingStamp && !isStampPlaced && (
-          <div className="absolute inset-0 bg-black/10 z-10 flex items-center justify-center pointer-events-none">
-            <div className="bg-white dark:bg-gray-800 p-4 rounded-lg shadow-lg text-center max-w-md">
-              <Info className="h-10 w-10 text-primary mx-auto mb-2" />
-              <h3 className="text-lg font-medium mb-1">
-                Place Your Signature Stamp
-              </h3>
-              <p className="text-sm text-muted-foreground mb-2">
-                Click anywhere on the document to place your signature stamp.
-                You&apos;ll be able to adjust or reset the position before
-                confirming.
-              </p>
-            </div>
+            {/* Stamp Rendering */}
+            {isPlacingStamp && qrCodeUrl && stampPosition && (
+              <div
+                ref={stampRef}
+                className={`absolute z-10 ${
+                  isDraggingStamp ? 'cursor-grabbing' : 'cursor-grab'
+                }`}
+                style={{
+                  left: `${stampPosition.x * scale}px`, // Position relative to wrapper
+                  top: `${stampPosition.y * scale}px`, // Position relative to wrapper
+                  transform: `translate(-50%, -50%) scale(${scale})`, // Center and scale proportionally
+                  transformOrigin: 'center center',
+                }}
+                onMouseDown={handleStampMouseDown}
+              >
+                <QRCodeStamp url={qrCodeUrl} />
+              </div>
+            )}
           </div>
         )}
       </div>

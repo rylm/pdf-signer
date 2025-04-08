@@ -1,36 +1,72 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# PDF QR Code Stamper (v0.2)
+
+A Next.js application that allows users to upload PDFs, stamp them with QR codes for verification, and upload them to S3 for cloud storage and sharing.
+
+## Features
+
+- Upload PDFs directly from your browser
+- Generate QR codes linked to the final S3 URL
+- Visual UI for placing QR codes precisely on your document
+- Direct upload to S3 using presigned POST URLs
+- Copy and share links to your cloud-stored documents
+
+## Architecture
+
+This application is designed to run entirely client-side after being exported as a static site. It uses:
+
+- React for the UI components
+- Next.js for the build pipeline
+- pdf-lib for PDF manipulation
+- qrcode.react for QR code generation
+- Unauthenticated AWS API Gateway endpoint to obtain presigned POST URLs
+- Direct browser-to-S3 upload using presigned POST
 
 ## Getting Started
 
-First, run the development server:
+First, set up your environment:
+
+1. Copy `.env.local.example` to `.env.local` and add your API Gateway endpoint URL:
+
+   ```
+   NEXT_PUBLIC_API_ENDPOINT="https://your-api-gateway-url.amazonaws.com/generate-upload-url"
+   ```
+
+2. Install dependencies:
+
+   ```bash
+   npm install
+   # or
+   yarn install
+   ```
+
+3. Run the development server:
+
+   ```bash
+   npm run dev
+   # or
+   yarn dev
+   ```
+
+4. Open [http://localhost:3000](http://localhost:3000) with your browser to use the application.
+
+## Building for Production
+
+To create a static export for hosting:
 
 ```bash
-npm run dev
+npm run build
 # or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+yarn build
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+The static files will be generated in the `out` directory, ready to be deployed to any static hosting service.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Backend Requirements
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+This application requires a backend service that provides:
 
-## Learn More
+1. An API Gateway endpoint that returns presigned S3 POST URLs
+2. An S3 bucket configured with CORS and appropriate public read access
+3. Optional but recommended: CloudFront distribution for serving the PDFs
 
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+For security, the API endpoint should be protected by a WAF with rate limiting.
